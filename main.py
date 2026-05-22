@@ -1,30 +1,26 @@
 import asyncio
 import json
-import os
-from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
-from aiogram.enums import MessageEntityType
 
 BOT_TOKEN = "8602088863:AAE6OaqX1XrseigB9cawnRrzzX7cQIOZjy8"
-PORT = int(os.environ.get("PORT", 8080))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-cache: dict[str, list[dict]] = {}
+emoji_cache: dict[str, list[dict]] = {}
 
 
-def keyboard(key: str) -> InlineKeyboardMarkup:
+def build_format_keyboard(msg_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="📦 JSON", callback_data=f"fmt:json:{key}"),
-            InlineKeyboardButton(text="📝 Plain", callback_data=f"fmt:plain:{key}"),
+            InlineKeyboardButton(text="📦 JSON", callback_data=f"fmt:json:{msg_id}"),
+            InlineKeyboardButton(text="📝 Plain Text", callback_data=f"fmt:plain:{msg_id}"),
         ],
         [
-            InlineKeyboardButton(text="🆔 ID Only", callback_data=f"fmt:ids:{key}"),
-            InlineKeyboardButton(text="🧾 HTML Tag", callback_data=f"fmt:html:{key}"),
+            InlineKeyboardButton(text="🆔 IDs Only", callback_data=f"fmt:ids:{msg_id}"),
+            InlineKeyboardButton(text="🧾 HTML Tag", callback_data=f"fmt:html:{msg_id}"),
         ]
     ])
 
@@ -32,84 +28,46 @@ def keyboard(key: str) -> InlineKeyboardMarkup:
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer(
-        "Send me any custom emoji or sticker and I'll extract all data from it.\n\n"
-        "Works with:\n"
-        "• Custom emoji in text\n"
-        "• Animated stickers\n"
-        "• App icon emoji packs\n"
-        "• Regular stickers"
+        "Send me any message containing custom emoji and I'll extract all the data.\n\nChoose your output format after sending."
     )
 
 
-@dp.message(F.sticker)
-async def handle_sticker(message: Message):
-    s = message.sticker
-    data = [{
-        "source": "sticker",
-        "file_id": s.file_id,
-        "file_unique_id": s.file_unique_id,
-        "custom_emoji_id": s.custom_emoji_id,
-        "emoji": s.emoji,
-        "set_name": s.set_name,
-        "type": s.type,
-        "is_animated": s.is_animated,
-        "is_video": s.is_video,
-        "width": s.width,
-        "height": s.height,
-        "thumbnail_file_id": s.thumbnail.file_id if s.thumbnail else None,
-        "thumbnail_file_unique_id": s.thumbnail.file_unique_id if s.thumbnail else None,
-    }]
-    key = str(message.message_id)
-    cache[key] = data
-    await message.reply("Sticker received! Pick a format:", reply_markup=keyboard(key))
-
-
 @dp.message(F.text | F.caption)
-async def handle_text(message: Message):
+async def handle_message(message: Message):
     entities = message.entities or message.caption_entities or []
-    text = message.text or message.caption or ""
+    custom_emojis = [e for e in entities if e.type == "custom_emoji"]
 
-    custom = [e for e in entities if e.type == MessageEntityType.CUSTOM_EMOJI]
-
-    if not custom:
-        await message.reply(
-            "No custom emoji found.\n\n"
-            "Make sure you're sending emoji from the <b>custom emoji packs</b> (not standard unicode emoji).\n"
-            "Try sending them as stickers instead.",
-            parse_mode="HTML"
-        )
+    if not custom_emojis:
+        await message.reply("No custom emoji found in your message.")
         return
 
+    text = message.text or message.caption or ""
+
     data = []
-    for e in custom:
-        try:
-            char = text[e.offset: e.offset + e.length]
-        except Exception:
-            char = ""
+    for e in custom_emojis:
+        emoji_char = text[e.offset:e.offset + e.length]
         data.append({
-            "source": "custom_emoji_entity",
             "type": e.type,
-            "custom_emoji_id": e.custom_emoji_id,
-            "emoji_char": char,
             "offset": e.offset,
             "length": e.length,
+            "custom_emoji_id": e.custom_emoji_id,
+            "emoji_char": emoji_char
         })
 
-    key = str(message.message_id)
-    cache[key] = data
+    cache_key = str(message.message_id)
+    emoji_cache[cache_key] = data
+
     await message.reply(
         f"Found <b>{len(data)}</b> custom emoji. Pick a format:",
         parse_mode="HTML",
-        reply_markup=keyboard(key)
+        reply_markup=build_format_keyboard(cache_key)
     )
 
 
 @dp.callback_query(F.data.startswith("fmt:"))
 async def handle_format(callback: CallbackQuery):
-    parts = callback.data.split(":", 2)
-    fmt = parts[1]
-    key = parts[2]
-    data = cache.get(key)
+    _, fmt, cache_key = callback.data.split(":", 2)
+    data = emoji_cache.get(cache_key)
 
     if not data:
         await callback.answer("Session expired. Send the emoji again.", show_alert=True)
@@ -117,41 +75,26 @@ async def handle_format(callback: CallbackQuery):
 
     if fmt == "json":
         output = f"<pre>{json.dumps(data, indent=2, ensure_ascii=False)}</pre>"
-
     elif fmt == "plain":
         lines = []
         for i, e in enumerate(data, 1):
-            line = f"<b>#{i}</b>\n"
-            for k, v in e.items():
-                line += f"  <b>{k}:</b> {v}\n"
-            lines.append(line.strip())
+            lines.append(
+                f"#{i}\n"
+                f"  Emoji: {e['emoji_char']}\n"
+                f"  ID: {e['custom_emoji_id']}\n"
+                f"  Offset: {e['offset']}\n"
+                f"  Length: {e['length']}"
+            )
         output = "\n\n".join(lines)
-
     elif fmt == "ids":
-        ids = []
-        for e in data:
-            val = e.get("custom_emoji_id") or e.get("file_unique_id") or "N/A"
-            ids.append(str(val))
-        output = "<pre>" + "\n".join(ids) + "</pre>"
-
+        ids = [e["custom_emoji_id"] for e in data]
+        output = "\n".join(ids)
     elif fmt == "html":
-        tags = []
-        for e in data:
-            if e.get("source") == "custom_emoji_entity":
-                tags.append(
-                    f'&lt;tg-emoji emoji-id="{e["custom_emoji_id"]}"&gt;'
-                    f'{e.get("emoji_char", "⭐")}'
-                    f'&lt;/tg-emoji&gt;'
-                )
-            else:
-                cid = e.get("custom_emoji_id")
-                emoji = e.get("emoji", "⭐")
-                if cid:
-                    tags.append(f'&lt;tg-emoji emoji-id="{cid}"&gt;{emoji}&lt;/tg-emoji&gt;')
-                else:
-                    tags.append(f"No HTML tag available\nfile_unique_id: {e.get('file_unique_id')}")
+        tags = [
+            f'&lt;tg-emoji emoji-id="{e["custom_emoji_id"]}"&gt;{e["emoji_char"]}&lt;/tg-emoji&gt;'
+            for e in data
+        ]
         output = "\n".join(tags)
-
     else:
         await callback.answer("Unknown format.", show_alert=True)
         return
@@ -160,17 +103,7 @@ async def handle_format(callback: CallbackQuery):
     await callback.answer()
 
 
-async def health(request):
-    return web.Response(text="OK")
-
-
 async def main():
-    app = web.Application()
-    app.router.add_get("/", health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
     await dp.start_polling(bot)
 
 
